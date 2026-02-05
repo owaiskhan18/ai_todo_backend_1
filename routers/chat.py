@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 
-from google import genai
+import google.generativeai as genai  # ✅ Correct import
 
 from services.auth import get_current_user
 from models.user import User
@@ -14,8 +14,8 @@ from database import get_session
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-# ✅ Gemini client
-client = genai.Client(api_key=settings.GEMINI_API_KEY)
+# ✅ Initialize Gemini client
+genai.api_key = settings.GEMINI_API_KEY
 
 # Simple in-memory conversation history
 conversation_history: Dict[str, List[Dict[str, Any]]] = {}
@@ -50,7 +50,7 @@ async def chat_with_ai(
         ]
 
         # ✅ Use a valid Gemini 2.5 model
-        response = client.models.generate_content(
+        response = genai.models.generate_content(
             model="models/gemini-2.5-flash",  # Updated model
             contents=contents,
         )
