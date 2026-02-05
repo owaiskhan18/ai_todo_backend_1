@@ -3,22 +3,22 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 
-import google.generativeai as genai  # ✅ Correct import
+import google.genai as genai  # ✅ Correct SDK
 
 from services.auth import get_current_user
 from models.user import User
 from config import settings
-from core.ai_tools import available_tools_for_gemini, run_ai_tool
+from core.ai_tools import run_ai_tool
 from sqlmodel import Session
 from database import get_session
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-# ✅ Initialize Gemini client
-genai.api_key = settings.GEMINI_API_KEY
+# Initialize Gemini client
+client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
-# Simple in-memory conversation history
-conversation_history: Dict[str, List[Dict[str, Any]]] = {}
+# In‑memory conversation history per user
+conversation_sessions: Dict[str, Any] = {}
 
 
 class ChatMessageRequest(BaseModel):
@@ -40,62 +40,30 @@ async def chat_with_ai(
 ):
     user_id = str(current_user.id)
 
-    if user_id not in conversation_history:
-        conversation_history[user_id] = []
-
     try:
-        # Build conversation for Gemini
-        contents = conversation_history[user_id] + [
-            {"role": "user", "parts": [{"text": request.message}]}
-        ]
+        # Create or reuse a chat session
+        if user_id not in conversation_sessions:
+            # new chat session
+            chat = client.chats.create(model="gemini-2.5-flash")
+            conversation_sessions[user_id] = chat
+        else:
+            chat = conversation_sessions[user_id]
 
-        # ✅ Use a valid Gemini 2.5 model
-        response = genai.models.generate_content(
-            model="models/gemini-2.5-flash",  # Updated model
-            contents=contents,
-        )
+        # send the user message to the chat session
+        response = chat.send_message(request.message)
 
-        ai_reply = ""
+        ai_reply = response.text or "Done ✅"
         task_created = False
         task_id = None
 
-        # ✅ Parse response safely
-        if response.candidates:
-            for candidate in response.candidates:
-                for part in candidate.content.parts:
-                    # Normal text reply
-                    if getattr(part, "text", None):
-                        ai_reply += part.text
-
-                    # Tool call
-                    if getattr(part, "function_call", None):
-                        fc = part.function_call
-                        tool_name = fc.name
-                        tool_args = dict(fc.args) if fc.args else {}
-
-                        tool_result = await run_ai_tool(
-                            tool_name=tool_name,
-                            args=tool_args,
-                            user_id=user_id,
-                            session=session,
-                        )
-
-                        ai_reply += f"\n\n{tool_result}"
-
-                        if tool_name == "create_task" and isinstance(tool_result, dict):
-                            task_created = True
-                            task_id = str(tool_result.get("id"))
-
-        # Save conversation
-        conversation_history[user_id].append(
-            {"role": "user", "parts": [{"text": request.message}]}
-        )
-        conversation_history[user_id].append(
-            {"role": "model", "parts": [{"text": ai_reply}]}
-        )
+        # You could parse the reply here if you expect tool / task calls
+        # Example (if your tool returns JSON from the AI):
+        # if "create_task" in ai_reply:
+        #     task_created = True
+        #     task_id = "some_id"
 
         return ChatMessageResponse(
-            reply=ai_reply or "Done ✅",
+            reply=ai_reply,
             task_created=task_created,
             task_id=task_id,
         )
