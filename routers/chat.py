@@ -1,14 +1,17 @@
+
 # backend/routers/chat.py
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
+from datetime import datetime
 
-import google.genai as genai  # ✅ Correct SDK
+import google.genai as genai  # Official SDK
 
 from services.auth import get_current_user
 from models.user import User
+from models.task import Task
 from config import settings
-from core.ai_tools import run_ai_tool
 from sqlmodel import Session
 from database import get_session
 
@@ -17,8 +20,14 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 # Initialize Gemini client
 client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
-# In‑memory conversation history per user
+# Conversation sessions per user
 conversation_sessions: Dict[str, Any] = {}
+
+# Track task creation state per user
+task_creation_sessions: Dict[str, Dict[str, Any]] = {}
+
+# Allowed ENUM priorities in DB
+VALID_PRIORITIES = {"Low", "Medium", "High"}
 
 
 class ChatMessageRequest(BaseModel):
@@ -27,8 +36,6 @@ class ChatMessageRequest(BaseModel):
 
 class ChatMessageResponse(BaseModel):
     reply: str
-    task_created: Optional[bool] = False
-    task_id: Optional[str] = None
 
 
 @router.post("/", response_model=ChatMessageResponse)
@@ -41,32 +48,72 @@ async def chat_with_ai(
     user_id = str(current_user.id)
 
     try:
-        # Create or reuse a chat session
+        # --- Create or reuse chat session ---
         if user_id not in conversation_sessions:
-            # new chat session
-            chat = client.chats.create(model="gemini-2.5-flash")
-            conversation_sessions[user_id] = chat
+            chat_session = client.chats.create(model="gemini-2.5-flash")
+            conversation_sessions[user_id] = chat_session
         else:
-            chat = conversation_sessions[user_id]
+            chat_session = conversation_sessions[user_id]
 
-        # send the user message to the chat session
-        response = chat.send_message(request.message)
+        # --- Check if user is in task creation flow ---
+        if user_id in task_creation_sessions:
+            task_data = task_creation_sessions[user_id]
 
-        ai_reply = response.text or "Done ✅"
-        task_created = False
-        task_id = None
+            # Step 1: Collect Title
+            if "title" not in task_data:
+                task_data["title"] = request.message.strip()
+                return ChatMessageResponse(reply="Got it! Now provide the task description:")
 
-        # You could parse the reply here if you expect tool / task calls
-        # Example (if your tool returns JSON from the AI):
-        # if "create_task" in ai_reply:
-        #     task_created = True
-        #     task_id = "some_id"
+            # Step 2: Collect Description
+            if "description" not in task_data:
+                task_data["description"] = request.message.strip()
+                return ChatMessageResponse(
+                    reply=f"Great! Set the priority for this task (Low, Medium, High):"
+                )
 
-        return ChatMessageResponse(
-            reply=ai_reply,
-            task_created=task_created,
-            task_id=task_id,
-        )
+            # Step 3: Collect Priority
+            if "priority" not in task_data:
+                priority = request.message.strip().capitalize()
+                if priority not in VALID_PRIORITIES:
+                    return ChatMessageResponse(
+                        reply="Invalid priority. Please enter one of: Low, Medium, High"
+                    )
+                task_data["priority"] = priority
+
+                # --- All data collected, save to DB ---
+                ai_task = Task(
+                    title=task_data["title"][:100],
+                    description=task_data["description"][:500],
+                    user_id=current_user.id,
+                    priority=task_data["priority"],
+                    created_at=datetime.utcnow(),
+                    due_date=None,
+                    enable_reminder=False,
+                )
+                session.add(ai_task)
+                session.commit()
+                session.refresh(ai_task)
+
+                # Clear task creation session
+                del task_creation_sessions[user_id]
+
+                return ChatMessageResponse(
+                    reply=f"Task '{ai_task.title}' added successfully!"
+                )
+
+        # --- Normal chat flow ---
+        message_text = request.message.strip().lower()
+
+        # Trigger task creation if user says "add task"
+        if "add task" in message_text:
+            task_creation_sessions[user_id] = {}  # start task creation flow
+            return ChatMessageResponse(reply="Sure! Let's create a new task. What is the task title?")
+
+        # Otherwise, send message to AI
+        response = chat_session.send_message(request.message)
+        reply_text = response.text or "No reply from AI"
+
+        return ChatMessageResponse(reply=reply_text)
 
     except Exception as e:
         import traceback

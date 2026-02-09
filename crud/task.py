@@ -3,11 +3,11 @@ from sqlmodel import Session, select
 from models.task import Task, Priority
 from schemas.task import TaskCreate, TaskUpdate
 from typing import List, Optional
-from uuid import uuid4 # Using uuid for task IDs as per frontend Task interface (string id)
+# Removed uuid import as task IDs are now integers
 
 def get_tasks(
     session: Session,
-    user_id: str,
+    user_id: int, # Changed to int
     title: Optional[str] = None,
     due_date: Optional[str] = None, # Expect YYYY-MM-DD
     priority: Optional[Priority] = None
@@ -24,15 +24,15 @@ def get_tasks(
         
     return session.exec(statement).all()
 
-def create_task(session: Session, task_create: TaskCreate, user_id: str) -> Task:
-    # Using UUID for task ID as per frontend Task interface, SQLModel will handle string conversion for PK if needed or adjust model
-    db_task = Task(id=str(uuid4()), **task_create.model_dump(), user_id=user_id)
+def create_task(session: Session, task_create: TaskCreate, user_id: int) -> Task: # Changed user_id to int
+    # Task ID is auto-incremented integer, so no need to pass id explicitly
+    db_task = Task(**task_create.model_dump(), user_id=user_id)
     session.add(db_task)
     session.commit()
     session.refresh(db_task)
     return db_task
 
-def get_task_by_id(session: Session, task_id: str, user_id: str) -> Optional[Task]:
+def get_task_by_id(session: Session, task_id: int, user_id: int) -> Optional[Task]: # Changed task_id and user_id to int
     statement = select(Task).where(Task.id == task_id, Task.user_id == user_id)
     return session.exec(statement).first()
 
